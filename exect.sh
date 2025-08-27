@@ -43,16 +43,20 @@ else
     exit 1
 fi
 
-# --- 1.5. Solicitar IP Estática ---
-log_info "Por favor, introduce la dirección IP estática de este servidor."
-read -p "IP estática: " STATIC_IP
+# --- 1.5. Detección Automática de IP ---
+log_info "Detectando la dirección IP principal del servidor..."
+# Obtener la interfaz de la ruta por defecto
+INTERFACE=$(ip route | grep default | awk '{print $5}')
+# Obtener la IP de esa interfaz
+SERVER_IP=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
 
-if [ -z "$STATIC_IP" ]; then
-    log_error "La dirección IP no puede estar vacía."
+if [ -z "$SERVER_IP" ] || [ -z "$INTERFACE" ]; then
+    log_error "No se pudo detectar automáticamente la dirección IP principal."
+    log_error "Asegúrate de que el servidor tenga una interfaz de red configurada con una IP y una ruta por defecto."
     exit 1
 fi
 
-log_info "Se configurarán los servicios para que sean accesibles en la IP: ${YELLOW}$STATIC_IP${NC}"
+log_info "IP detectada automáticamente: ${YELLOW}$SERVER_IP${NC} (Interfaz: ${YELLOW}$INTERFACE${NC})"
 echo ""
 
 # --- 2. Instalación de Docker ---
@@ -100,7 +104,7 @@ log_info "Creando el directorio 'enviroment' y los archivos de configuración...
 mkdir -p enviroment
 cd enviroment
 
-# Crear el archivo docker-compose.yml con SQLite para todos los servicios
+# Crear el archivo docker-compose.yml con SQLite y la IP detectada
 cat << EOF > docker-compose.yml
 version: '3.8'
 
@@ -112,7 +116,7 @@ services:
       - USER_UID=1000
       - USER_GID=1000
       - GITEA__database__DB_TYPE=sqlite3
-      - GITEA__server__ROOT_URL=http://${STATIC_IP}/gitea
+      - GITEA__server__ROOT_URL=http://${SERVER_IP}/gitea
     restart: always
     networks:
       - proxy-net
@@ -126,7 +130,7 @@ services:
     container_name: kanboard
     restart: always
     environment:
-      - KANBOARD_URL=http://${STATIC_IP}/kb
+      - KANBOARD_URL=http://${SERVER_IP}/kb
     volumes:
       - ./kanboard-data:/var/www/app/data
       - ./kanboard-plugins:/var/www/app/plugins
@@ -138,9 +142,9 @@ services:
     container_name: nextcloud
     restart: always
     environment:
-      - NEXTCLOUD_TRUSTED_DOMAINS=${STATIC_IP}
+      - NEXTCLOUD_TRUSTED_DOMAINS=${SERVER_IP}
       - OVERWRITEPROTOCOL=http
-      - OVERWRITEHOST=${STATIC_IP}
+      - OVERWRITEHOST=${SERVER_IP}
       - OVERWRITEWEBROOT=/nextcloud
     volumes:
       - ./nextcloud-data:/var/www/html
@@ -167,7 +171,7 @@ networks:
     driver: bridge
 EOF
 
-# Crear el archivo de configuración de Nginx (sin cambios)
+# Crear el archivo de configuración de Nginx con la IP detectada
 cat << EOF > nginx.conf
 worker_processes 1;
 
@@ -185,7 +189,7 @@ http {
 
     server {
         listen 80;
-        server_name ${STATIC_IP};
+        server_name ${SERVER_IP};
 
         location /gitea/ {
             proxy_pass http://gitea:3000/;
@@ -228,11 +232,11 @@ echo ""
 log_info "========================= ¡PROCESO COMPLETADO! ========================="
 log_info "El entorno ha sido desplegado correctamente con SQLite3 para todos los servicios."
 log_info "Los servicios están disponibles en las siguientes URLs:"
-log_info "  - Gitea:     http://${STATIC_IP}/gitea"
-log_info "  - Kanboard:  http://${STATIC_IP}/kb"
-log_info "  - Nextcloud: http://${STATIC_IP}/nextcloud"
+log_info "  - Gitea:     http://${SERVER_IP}/gitea"
+log_info "  - Kanboard:  http://${SERVER_IP}/kb"
+log_info "  - Nextcloud: http://${SERVER_IP}/nextcloud"
 log_info ""
-log_info "Los datos persistentes (incluidas las bases de datos SQLite) se guardarán en el directorio 'enviroment'."
+log_info "Los datos persistentes se guardarán en el directorio 'enviroment'."
 if [ -n "$SUDO_USER" ]; then
     log_warn "RECUERDA: Debes cerrar tu sesión y volver a iniciarla para poder usar 'docker' sin 'sudo'."
 fi
