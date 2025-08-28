@@ -65,7 +65,7 @@ log_info "Actualizando lista de paquetes..."
 apt-get update
 
 log_info "Instalando dependencias necesarias..."
-apt-get install ca-certificates curl git -y
+apt-get install ca-certificates curl git openssl -y
 
 log_info "Creando directorio para llaves de APT..."
 install -m 0755 -d /etc/apt/keyrings
@@ -104,7 +104,7 @@ log_info "Creando el directorio 'enviroment' y los archivos de configuración...
 mkdir -p enviroment
 cd enviroment
 
-# Crear el archivo docker-compose.yml con SQLite y la IP detectada
+# Crear el archivo docker-compose.yml con Planka
 cat << EOF > docker-compose.yml
 version: '3.8'
 
@@ -125,18 +125,6 @@ services:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
 
-  kanboard:
-    image: kanboard/kanboard:latest
-    container_name: kanboard
-    restart: always
-    environment:
-      - KANBOARD_URL=http://${SERVER_IP}/kb
-    volumes:
-      - ./kanboard-data:/var/www/app/data
-      - ./kanboard-plugins:/var/www/app/plugins
-    networks:
-      - proxy-net
-
   nextcloud:
     image: nextcloud:latest
     container_name: nextcloud
@@ -151,6 +139,32 @@ services:
     networks:
       - proxy-net
 
+  planka:
+    image: plankabot/planka:latest
+    container_name: planka
+    restart: always
+    environment:
+      - BASE_URL=http://${SERVER_IP}/planka
+      - DATABASE_URL=postgresql://planka:planka@db_planka:5432/planka
+      - SECRET_KEY=$(openssl rand -hex 32)
+    networks:
+      - proxy-net
+    depends_on:
+      - db_planka
+
+  db_planka:
+    image: postgres:14
+    container_name: db_planka
+    restart: always
+    environment:
+      - POSTGRES_USER=planka
+      - POSTGRES_PASSWORD=planka
+      - POSTGRES_DB=planka
+    networks:
+      - proxy-net
+    volumes:
+      - ./postgres-planka-data:/var/lib/postgresql/data
+
   nginx:
     image: nginx:latest
     container_name: nginx_proxy
@@ -162,8 +176,8 @@ services:
       - proxy-net
     depends_on:
       - gitea
-      - kanboard
       - nextcloud
+      - planka
     restart: always
 
 networks:
@@ -171,7 +185,7 @@ networks:
     driver: bridge
 EOF
 
-# Crear el archivo de configuración de Nginx con la IP detectada
+# Crear el archivo de configuración de Nginx con Planka
 cat << EOF > nginx.conf
 worker_processes 1;
 
@@ -199,14 +213,6 @@ http {
             proxy_set_header X-Forwarded-Proto \$scheme;
         }
 
-        location /kb/ {
-            proxy_pass http://kanboard:80/;
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto \$scheme;
-        }
-
         location /nextcloud/ {
             proxy_pass http://nextcloud:80/;
             proxy_set_header Host \$host;
@@ -216,6 +222,14 @@ http {
 
             client_max_body_size 512M;
             proxy_request_buffering off;
+        }
+
+        location /planka/ {
+            proxy_pass http://planka:1337/;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
         }
     }
 }
@@ -230,11 +244,11 @@ docker compose up -d
 
 echo ""
 log_info "========================= ¡PROCESO COMPLETADO! ========================="
-log_info "El entorno ha sido desplegado correctamente con SQLite3 para todos los servicios."
+log_info "El entorno ha sido desplegado correctamente."
 log_info "Los servicios están disponibles en las siguientes URLs:"
 log_info "  - Gitea:     http://${SERVER_IP}/gitea"
-log_info "  - Kanboard:  http://${SERVER_IP}/kb"
 log_info "  - Nextcloud: http://${SERVER_IP}/nextcloud"
+log_info "  - Planka:    http://${SERVER_IP}/planka"
 log_info ""
 log_info "Los datos persistentes se guardarán en el directorio 'enviroment'."
 if [ -n "$SUDO_USER" ]; then
