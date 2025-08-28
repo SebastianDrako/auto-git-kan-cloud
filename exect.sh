@@ -45,14 +45,11 @@ fi
 
 # --- 1.5. Detección Automática de IP ---
 log_info "Detectando la dirección IP principal del servidor..."
-# Obtener la interfaz de la ruta por defecto
 INTERFACE=$(ip route | grep default | awk '{print $5}')
-# Obtener la IP de esa interfaz
 SERVER_IP=$(ip -4 addr show "$INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
 
 if [ -z "$SERVER_IP" ] || [ -z "$INTERFACE" ]; then
     log_error "No se pudo detectar automáticamente la dirección IP principal."
-    log_error "Asegúrate de que el servidor tenga una interfaz de red configurada con una IP y una ruta por defecto."
     exit 1
 fi
 
@@ -95,7 +92,7 @@ if [ -n "$SUDO_USER" ]; then
     usermod -aG docker "$SUDO_USER"
     log_warn "El usuario '$SUDO_USER' debe cerrar sesión y volver a iniciarla para usar Docker sin sudo."
 else
-    log_warn "No se pudo detectar el usuario que ejecutó sudo. Omita este paso si está ejecutando como root directamente."
+    log_warn "No se pudo detectar el usuario que ejecutó sudo."
 fi
 
 # --- 4. Crear el entorno y los archivos de configuración ---
@@ -104,11 +101,15 @@ log_info "Creando el directorio 'enviroment' y los archivos de configuración...
 mkdir -p enviroment
 cd enviroment
 
-# Crear el archivo docker-compose.yml con Wekan
+# Generar una clave secreta aleatoria para Taiga
+TAIGA_SECRET_KEY=$(openssl rand -hex 64)
+
+# Crear el archivo docker-compose.yml con Gitea, Nextcloud y Taiga
 cat << EOF > docker-compose.yml
 version: '3.8'
 
 services:
+  # --- GITEA Y NEXTCLOUD (con SQLite) ---
   gitea:
     image: gitea/gitea:latest
     container_name: gitea
@@ -122,8 +123,6 @@ services:
       - proxy-net
     volumes:
       - ./gitea-data:/data
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
 
   nextcloud:
     image: nextcloud:latest
@@ -139,27 +138,72 @@ services:
     networks:
       - proxy-net
 
-  wekan:
-    image: wekanteam/wekan:latest
-    container_name: wekan
-    restart: always
+  # --- PILA DE TAIGA ---
+  taiga-db:
+    image: postgres:15-alpine
+    container_name: taiga_db
     environment:
-      - MONGO_URL=mongodb://wekan-db:27017/wekan
-      - ROOT_URL=http://${SERVER_IP}/wekan
+      - POSTGRES_DB=taiga
+      - POSTGRES_USER=taiga
+      - POSTGRES_PASSWORD=taiga
+    volumes:
+      - ./postgres-taiga-data:/var/lib/postgresql/data
+    networks:
+      - proxy-net
+    restart: always
+
+  taiga-back:
+    image: taigaio/taiga-back:latest
+    container_name: taiga_back
+    environment:
+      - TAIGA_DB_HOST=taiga-db
+      - TAIGA_DB_PASSWORD=taiga
+      - TAIGA_DB_USER=taiga
+      - TAIGA_DB_NAME=taiga
+      - TAIGA_SECRET_KEY=${TAIGA_SECRET_KEY}
+      - TAIGA_SITES_SCHEME=http
+      - TAIGA_SITES_DOMAIN=${SERVER_IP}
+      - TAIGA_SUBPATH=/taiga
+      - TAIGA_ATTACHMENTS_DIR=/taiga-data/attachments
+      - TAIGA_MEDIA_DIR=/taiga-data/media
+      - RABBITMQ_USER=taiga
+      - RABBITMQ_PASS=taiga
+      - RABBITMQ_VHOST=taiga
+    volumes:
+      - ./taiga-data:/taiga-data
     networks:
       - proxy-net
     depends_on:
-      - wekan-db
-
-  wekan-db:
-    image: mongo:4.4
-    container_name: wekan_db
+      - taiga-db
+      - taiga-rabbit
     restart: always
+
+  taiga-front:
+    image: taigaio/taiga-front:latest
+    container_name: taiga_front
+    environment:
+      - TAIGA_URL=http://${SERVER_IP}/taiga
+      - TAIGA_WEBSOCKETS_URL=ws://${SERVER_IP}/taiga
+      - TAIGA_API_URL=http://${SERVER_IP}/taiga/api/v1/
     networks:
       - proxy-net
-    volumes:
-      - ./mongo-wekan-data:/data/db
+    depends_on:
+      - taiga-back
+    restart: always
 
+  taiga-rabbit:
+    image: rabbitmq:3-management-alpine
+    container_name: taiga_rabbit
+    hostname: taiga-rabbit
+    environment:
+      - RABBITMQ_DEFAULT_USER=taiga
+      - RABBITMQ_DEFAULT_PASS=taiga
+      - RABBITMQ_DEFAULT_VHOST=taiga
+    networks:
+      - proxy-net
+    restart: always
+
+  # --- PROXY PRINCIPAL ---
   nginx:
     image: nginx:latest
     container_name: nginx_proxy
@@ -172,7 +216,7 @@ services:
     depends_on:
       - gitea
       - nextcloud
-      - wekan
+      - taiga-front
     restart: always
 
 networks:
@@ -180,7 +224,7 @@ networks:
     driver: bridge
 EOF
 
-# Crear el archivo de configuración de Nginx con Wekan
+# Crear el archivo de configuración de Nginx
 cat << EOF > nginx.conf
 worker_processes 1;
 
@@ -199,6 +243,7 @@ http {
     server {
         listen 80;
         server_name ${SERVER_IP};
+        client_max_body_size 100M;
 
         location /gitea/ {
             proxy_pass http://gitea:3000/;
@@ -218,13 +263,14 @@ http {
             proxy_request_buffering off;
         }
         
-        location /wekan/ {
-            proxy_pass http://wekan:8080/;
+        location /taiga/ {
+            proxy_pass http://taiga-front:80/;
             proxy_set_header Host \$host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
-            # Headers para WebSocket, importante para la reactividad de Wekan
+
+            # Soporte para WebSockets
             proxy_http_version 1.1;
             proxy_set_header Upgrade \$http_upgrade;
             proxy_set_header Connection "upgrade";
@@ -237,7 +283,8 @@ log_info "Archivos docker-compose.yml y nginx.conf creados en el directorio 'env
 
 # --- 5. Ejecutar Docker Compose y finalizar ---
 
-log_info "Levantando los contenedores con Docker Compose... (esto puede tardar unos minutos)"
+log_info "Levantando los contenedores con Docker Compose..."
+log_warn "Taiga es una aplicación grande, el primer arranque puede tardar varios minutos en segundo plano."
 docker compose up -d
 
 echo ""
@@ -246,8 +293,9 @@ log_info "El entorno ha sido desplegado correctamente."
 log_info "Los servicios están disponibles en las siguientes URLs:"
 log_info "  - Gitea:     http://${SERVER_IP}/gitea"
 log_info "  - Nextcloud: http://${SERVER_IP}/nextcloud"
-log_info "  - Wekan:     http://${SERVER_IP}/wekan"
+log_info "  - Taiga:     http://${SERVER_IP}/taiga"
 log_info ""
+log_warn "Recuerda que Taiga puede tardar unos minutos en estar completamente operativo la primera vez."
 log_info "Los datos persistentes se guardarán en el directorio 'enviroment'."
 if [ -n "$SUDO_USER" ]; then
     log_warn "RECUERDA: Debes cerrar tu sesión y volver a iniciarla para poder usar 'docker' sin 'sudo'."
