@@ -65,7 +65,7 @@ log_info "Actualizando lista de paquetes..."
 apt-get update
 
 log_info "Instalando dependencias necesarias..."
-apt-get install ca-certificates curl git openssl -y
+apt-get install ca-certificates curl git -y
 
 log_info "Creando directorio para llaves de APT..."
 install -m 0755 -d /etc/apt/keyrings
@@ -104,7 +104,7 @@ log_info "Creando el directorio 'enviroment' y los archivos de configuración...
 mkdir -p enviroment
 cd enviroment
 
-# Crear el archivo docker-compose.yml con Planka
+# Crear el archivo docker-compose.yml con Wekan
 cat << EOF > docker-compose.yml
 version: '3.8'
 
@@ -139,31 +139,26 @@ services:
     networks:
       - proxy-net
 
-  planka:
-    image: plankabot/planka:latest
-    container_name: planka
+  wekan:
+    image: wekanteam/wekan:latest
+    container_name: wekan
     restart: always
     environment:
-      - BASE_URL=http://${SERVER_IP}/planka
-      - DATABASE_URL=postgresql://planka:planka@db_planka:5432/planka
-      - SECRET_KEY=$(openssl rand -hex 32)
+      - MONGO_URL=mongodb://wekan-db:27017/wekan
+      - ROOT_URL=http://${SERVER_IP}/wekan
     networks:
       - proxy-net
     depends_on:
-      - db_planka
+      - wekan-db
 
-  db_planka:
-    image: postgres:14
-    container_name: db_planka
+  wekan-db:
+    image: mongo:4.4
+    container_name: wekan_db
     restart: always
-    environment:
-      - POSTGRES_USER=planka
-      - POSTGRES_PASSWORD=planka
-      - POSTGRES_DB=planka
     networks:
       - proxy-net
     volumes:
-      - ./postgres-planka-data:/var/lib/postgresql/data
+      - ./mongo-wekan-data:/data/db
 
   nginx:
     image: nginx:latest
@@ -177,7 +172,7 @@ services:
     depends_on:
       - gitea
       - nextcloud
-      - planka
+      - wekan
     restart: always
 
 networks:
@@ -185,7 +180,7 @@ networks:
     driver: bridge
 EOF
 
-# Crear el archivo de configuración de Nginx con Planka
+# Crear el archivo de configuración de Nginx con Wekan
 cat << EOF > nginx.conf
 worker_processes 1;
 
@@ -219,17 +214,20 @@ http {
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
-
             client_max_body_size 512M;
             proxy_request_buffering off;
         }
-
-        location /planka/ {
-            proxy_pass http://planka:1337/;
+        
+        location /wekan/ {
+            proxy_pass http://wekan:8080/;
             proxy_set_header Host \$host;
             proxy_set_header X-Real-IP \$remote_addr;
             proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto \$scheme;
+            # Headers para WebSocket, importante para la reactividad de Wekan
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
         }
     }
 }
@@ -248,7 +246,7 @@ log_info "El entorno ha sido desplegado correctamente."
 log_info "Los servicios están disponibles en las siguientes URLs:"
 log_info "  - Gitea:     http://${SERVER_IP}/gitea"
 log_info "  - Nextcloud: http://${SERVER_IP}/nextcloud"
-log_info "  - Planka:    http://${SERVER_IP}/planka"
+log_info "  - Wekan:     http://${SERVER_IP}/wekan"
 log_info ""
 log_info "Los datos persistentes se guardarán en el directorio 'enviroment'."
 if [ -n "$SUDO_USER" ]; then
