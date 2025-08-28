@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # --- Configuración de Colores y Mensajes ---
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
