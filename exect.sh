@@ -58,32 +58,46 @@ echo ""
 
 # --- 2. Instalación de Docker ---
 
-log_info "Actualizando lista de paquetes..."
-apt-get update
+if command -v docker &> /dev/null; then
+    log_info "Docker ya está instalado. Omitiendo la instalación."
+else
+    log_info "Docker no está instalado. Procediendo con la instalación..."
 
-log_info "Instalando dependencias necesarias..."
-apt-get install ca-certificates curl git -y
+    log_info "Actualizando lista de paquetes..."
+    apt-get update
 
-log_info "Creando directorio para llaves de APT..."
-install -m 0755 -d /etc/apt/keyrings
+    log_info "Instalando dependencias necesarias..."
+    apt-get install ca-certificates curl git -y
 
-log_info "Descargando la llave GPG de Docker..."
-curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
+    log_info "Creando directorio para llaves de APT..."
+    install -m 0755 -d /etc/apt/keyrings
 
-log_info "Añadiendo el repositorio de Docker..."
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
+    if [ -f "/etc/apt/keyrings/docker.asc" ]; then
+        log_info "La llave GPG de Docker ya existe. Omitiendo la descarga."
+    else
+        log_info "Descargando la llave GPG de Docker..."
+        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+    fi
 
-log_info "Actualizando la lista de paquetes con el nuevo repositorio..."
-apt-get update
+    if [ -f "/etc/apt/sources.list.d/docker.list" ]; then
+        log_info "El repositorio de Docker ya existe en sources.list. Omitiendo."
+    else
+        log_info "Añadiendo el repositorio de Docker..."
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+          $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+          tee /etc/apt/sources.list.d/docker.list > /dev/null
+    fi
 
-log_info "Instalando Docker Engine y sus componentes..."
-apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+    log_info "Actualizando la lista de paquetes con el nuevo repositorio..."
+    apt-get update
 
-log_info "Docker ha sido instalado correctamente."
+    log_info "Instalando Docker Engine y sus componentes..."
+    apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+
+    log_info "Docker ha sido instalado correctamente."
+fi
 
 # --- 3. Asignar permisos de Docker al usuario actual ---
 
